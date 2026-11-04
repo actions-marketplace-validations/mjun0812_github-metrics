@@ -364,7 +364,7 @@ jobs:
           echo "OK: ${SAMPLE_NAME}.png ($(wc -c < "$png_out" | tr -d ' ') bytes)"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sample-${{ matrix.name }}
           path: ${{ github.workspace }}/sample-out/
