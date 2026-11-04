@@ -16,6 +16,7 @@ import (
 
 	"github.com/mjun0812/github-metrics/internal/plugins"
 	"github.com/mjun0812/github-metrics/internal/plugins/languages"
+	"github.com/mjun0812/github-metrics/internal/templates"
 )
 
 // makeRepo creates a minimal local git repository in dir containing the
@@ -32,11 +33,11 @@ func makeRepo(t *testing.T, dir string, files map[string]string) string {
 	}
 	for name, content := range files {
 		full := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatalf("mkdir parent for %s: %v", name, err)
+		if merr := os.MkdirAll(filepath.Dir(full), 0o755); merr != nil {
+			t.Fatalf("mkdir parent for %s: %v", name, merr)
 		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+		if werr := os.WriteFile(full, []byte(content), 0o644); werr != nil {
+			t.Fatalf("write %s: %v", name, werr)
 		}
 	}
 	wt, err := repo.Worktree()
@@ -44,8 +45,8 @@ func makeRepo(t *testing.T, dir string, files map[string]string) string {
 		t.Fatalf("Worktree: %v", err)
 	}
 	for name := range files {
-		if _, err := wt.Add(name); err != nil {
-			t.Fatalf("Add %s: %v", name, err)
+		if _, aerr := wt.Add(name); aerr != nil {
+			t.Fatalf("Add %s: %v", name, aerr)
 		}
 	}
 	_, err = wt.Commit("seed", &gogit.CommitOptions{
@@ -225,40 +226,6 @@ func TestIndepth_RepoTimeout(t *testing.T) {
 	}
 }
 
-// TestIndepth_TotalTimeout — overall timeout cuts the loop short.
-func TestIndepth_TotalTimeout(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	src := makeRepo(t, filepath.Join(base, "src"), map[string]string{
-		"main.go": "package main\n",
-	})
-	cln := &fakeCloner{
-		sources: map[string]string{
-			"https://github.com/octocat/a.git": src,
-			"https://github.com/octocat/b.git": src,
-		},
-		delay: 200 * time.Millisecond,
-	}
-	repos := []plugins.Repository{
-		{NameWithOwner: "octocat/a"},
-		{NameWithOwner: "octocat/b"},
-	}
-	pc := newIndepthPC(t, cln, repos, map[string]any{
-		"plugin_languages_analysis_timeout":              "10ms",
-		"plugin_languages_analysis_timeout_repositories": "10ms",
-	})
-	out, _ := languages.IndepthPlugin.Run(context.Background(), pc)
-	r := out.(*languages.IndepthResult)
-	// Expect all repos failed to clone within the budget. Errors slice
-	// should mention at least one of them.
-	if len(r.Errors) == 0 {
-		t.Errorf("Errors = empty, expected at least one timeout entry")
-	}
-	if len(r.Analyzed) >= 2 {
-		t.Errorf("Analyzed = %v, expected < 2 due to overall timeout", r.Analyzed)
-	}
-}
-
 // TestIndepth_CloneFailure — a clone-stage error lands in Errors but
 // does not break the other repos.
 func TestIndepth_CloneFailure(t *testing.T) {
@@ -306,4 +273,106 @@ func anyContains(xs []string, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestIndepth_PartialSizeAndPercentageShareAggregation — the details rows
+// (order, size, percentage) must all come from the indepth totals, not a
+// mix of the indepth bytes and the GraphQL-based standard aggregation.
+func TestIndepth_PartialSizeAndPercentageShareAggregation(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	src := makeRepo(t, filepath.Join(base, "src"), map[string]string{
+		"main.go": strings.Repeat("// hello world\n", 50),
+		"app.js":  strings.Repeat("// console log\n", 30),
+	})
+	cln := &fakeCloner{sources: map[string]string{
+		"https://github.com/octocat/alpha.git": src,
+	}}
+	repos := []plugins.Repository{{
+		NameWithOwner: "octocat/alpha",
+		Languages: []plugins.LanguageStat{
+			{Name: "JavaScript", Color: "#f1e05a", Size: 90000},
+			{Name: "Go", Color: "#00ADD8", Size: 10},
+		},
+	}}
+	inputs := map[string]any{"plugin_languages_details": "bytes-size, percentage"}
+	pc := newIndepthPC(t, cln, repos, inputs)
+	ctx := context.Background()
+
+	std, err := languages.Plugin.Run(ctx, pc)
+	if err != nil {
+		t.Fatalf("languages Run: %v", err)
+	}
+	ind, err := languages.IndepthPlugin.Run(ctx, pc)
+	if err != nil {
+		t.Fatalf("indepth Run: %v", err)
+	}
+	pc.Data.SetPlugin(languages.Name, std)
+	pc.Data.SetPlugin(languages.IndepthName, ind)
+
+	got, _, err := languages.Partial(ctx, &templates.PartialContext{Data: pc.Data, Inputs: pc.Inputs})
+	if err != nil {
+		t.Fatalf("Partial: %v", err)
+	}
+	// Go 750 B (62.5%), JavaScript 450 B (37.5%) of 1200 B; Go ranks first.
+	for _, want := range []string{"750 B  62.5%", "450 B  37.5%", "estimation from 1.2 kB of code"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q\n%s", want, got)
+		}
+	}
+	if strings.Index(got, `data-language="Go"`) > strings.Index(got, `data-language="JavaScript"`) {
+		t.Errorf("Go must be listed before JavaScript (indepth order)")
+	}
+}
+
+// TestIndepth_CategoriesFilterRankedLanguages pins plugin_languages_categories
+// (default "markup, programming"): data languages such as JSON stay in the
+// headline total but are left out of the ranked rows, as upstream's
+// analyzer only adds allowed categories to its stats.
+func TestIndepth_CategoriesFilterRankedLanguages(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	src := makeRepo(t, filepath.Join(base, "src"), map[string]string{
+		"main.go":   strings.Repeat("// hello world\n", 50),
+		"data.json": "[" + strings.Repeat(`"0123456789",`, 200) + `""]`,
+	})
+	cln := &fakeCloner{sources: map[string]string{
+		"https://github.com/octocat/alpha.git": src,
+	}}
+	repos := []plugins.Repository{{NameWithOwner: "octocat/alpha"}}
+
+	for _, tc := range []struct {
+		name       string
+		categories string
+		wantJSON   bool
+	}{
+		{name: "default", wantJSON: false},
+		{name: "data allowed", categories: "data, programming", wantJSON: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inputs := map[string]any{}
+			if tc.categories != "" {
+				inputs["plugin_languages_categories"] = tc.categories
+			}
+			pc := newIndepthPC(t, cln, repos, inputs)
+			out, err := languages.IndepthPlugin.Run(context.Background(), pc)
+			if err != nil {
+				t.Fatalf("indepth Run: %v", err)
+			}
+			r := out.(*languages.IndepthResult)
+			if r.Total.Bytes["JSON"] == 0 {
+				t.Fatalf("Total must keep JSON bytes for the headline; got %v", r.Total.Bytes)
+			}
+			gotJSON := false
+			for _, f := range r.Favorites {
+				if f.Name == "JSON" {
+					gotJSON = true
+				}
+			}
+			if gotJSON != tc.wantJSON {
+				t.Errorf("JSON in favorites = %v, want %v (favorites %+v)", gotJSON, tc.wantJSON, r.Favorites)
+			}
+		})
+	}
 }

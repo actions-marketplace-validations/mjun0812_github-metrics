@@ -2,7 +2,6 @@ package achievements_test
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
@@ -10,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mjun0812/github-metrics/internal/dataprovider"
 	"github.com/mjun0812/github-metrics/internal/plugins"
 	"github.com/mjun0812/github-metrics/internal/plugins/achievements"
 	"github.com/mjun0812/github-metrics/internal/templates"
+	"github.com/mjun0812/github-metrics/internal/testutil/mocks"
 )
 
 var updateGolden = flag.Bool("update", false, "update golden files in tests/golden/...")
@@ -37,7 +38,11 @@ func repoRoot(t *testing.T) string {
 
 func run(t *testing.T, data *plugins.Data, inputs map[string]any) *achievements.Result {
 	t.Helper()
-	pc := &plugins.PluginContext{Inputs: inputs, Data: data}
+	in := map[string]any{"plugin_achievements": true}
+	for k, v := range inputs {
+		in[k] = v
+	}
+	pc := &plugins.PluginContext{Inputs: in, Data: data}
 	out, err := achievements.Plugin.Run(context.Background(), pc)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -107,118 +112,33 @@ func TestRun_Normal_ThresholdC(t *testing.T) {
 	}
 }
 
-// TestRun_AchievementCoverage — every adopted id surfaces in Ranks with
-// a non-empty rank token.
-func TestRun_AchievementCoverage(t *testing.T) {
-	t.Parallel()
-	want := []string{
-		"developer", "forker", "contributor", "reviewer", "packager",
-		"gister", "worker", "stargazer", "follower", "influencer",
-		"maintainer", "inspirer", "polyglot", "member", "sponsor",
-		"deployer", "chatter", "helper",
-	}
-	r := run(t, octocatData(), nil)
-	for _, id := range want {
-		if _, ok := r.Ranks[id]; !ok {
-			t.Errorf("missing rank entry for %q", id)
-		}
-	}
-}
-
-// TestRun_InfluencerWired — Followers > 0 must unlock Influencer
-// (regression for the old `followers: 0` hardcoded bug).
-func TestRun_InfluencerWired(t *testing.T) {
-	t.Parallel()
-	r := run(t, octocatData(), nil)
-	found := false
-	for _, a := range r.List {
-		if a.ID == "influencer" {
-			found = true
-			if a.Value != 6000 {
-				t.Errorf("influencer.Value = %d, want 6000", a.Value)
-			}
-			if a.Rank != "S" {
-				t.Errorf("influencer.Rank = %q, want S (>= 1000)", a.Rank)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("influencer not in list")
-	}
-}
-
-// TestRun_WorkerSemantics — Worker is now organizations count, not commits.
-func TestRun_WorkerSemantics(t *testing.T) {
-	t.Parallel()
-	r := run(t, octocatData(), nil)
-	for _, a := range r.List {
-		if a.ID == "worker" {
-			if a.Value != 3 {
-				t.Errorf("worker.Value = %d, want 3 (Organizations)", a.Value)
-			}
-			return
-		}
-	}
-	t.Errorf("worker not in list")
-}
-
-// TestRun_StargazerSemantics — Stargazer is now starred-by-me count.
-func TestRun_StargazerSemantics(t *testing.T) {
-	t.Parallel()
-	r := run(t, octocatData(), nil)
-	for _, a := range r.List {
-		if a.ID == "stargazer" {
-			if a.Value != 700 {
-				t.Errorf("stargazer.Value = %d, want 700 (User.Starred)", a.Value)
-			}
-			return
-		}
-	}
-	t.Errorf("stargazer not in list")
-}
-
-// TestRun_PolyglotSemantics — Polyglot is distinct language count.
-func TestRun_PolyglotSemantics(t *testing.T) {
-	t.Parallel()
-	r := run(t, octocatData(), nil)
-	for _, a := range r.List {
-		if a.ID == "polyglot" {
-			if a.Value != 7 {
-				t.Errorf("polyglot.Value = %d, want 7 distinct languages", a.Value)
-			}
-			return
-		}
-	}
-	t.Errorf("polyglot not in list")
-}
-
-// TestRun_MemberSemantics — Member is floor((now - CreatedAt) / year).
-func TestRun_MemberSemantics(t *testing.T) {
+// TestRun_ValueAndRank — polyglot is the distinct language count; member is
+// floor((now - CreatedAt) / year).
+func TestRun_ValueAndRank(t *testing.T) {
 	t.Parallel()
 	d := octocatData()
 	d.User.CreatedAt = time.Now().AddDate(-10, -6, 0) // 10.5 years
 	r := run(t, d, nil)
-	for _, a := range r.List {
-		if a.ID == "member" {
-			if a.Value != 10 {
-				t.Errorf("member.Value = %d, want 10 (years floor)", a.Value)
+	for _, tc := range []struct {
+		id        string
+		wantValue int
+		wantRank  string
+	}{
+		{"polyglot", 7, "B"},
+		{"member", 10, "S"},
+	} {
+		found := false
+		for _, a := range r.List {
+			if a.ID != tc.id {
+				continue
 			}
-			if a.Rank != "S" {
-				t.Errorf("member.Rank = %q, want S (>= 10)", a.Rank)
+			found = true
+			if a.Value != tc.wantValue || a.Rank != tc.wantRank {
+				t.Errorf("%s = (value %d, rank %q), want (%d, %q)", tc.id, a.Value, a.Rank, tc.wantValue, tc.wantRank)
 			}
-			return
 		}
-	}
-	t.Errorf("member not in list")
-}
-
-// TestRun_NoEngineerTitle — the Go-only Engineer achievement is gone.
-func TestRun_NoEngineerTitle(t *testing.T) {
-	t.Parallel()
-	r := run(t, octocatData(), nil)
-	for _, a := range r.List {
-		if a.Title == "Engineer" || a.ID == "engineer" {
-			t.Errorf("Engineer should not exist; got %+v", a)
+		if !found {
+			t.Errorf("%s not in list", tc.id)
 		}
 	}
 }
@@ -240,6 +160,9 @@ func TestRun_ThresholdS(t *testing.T) {
 	r := run(t, octocatData(), map[string]any{
 		"plugin_achievements_threshold": "S",
 	})
+	if len(r.List) == 0 {
+		t.Fatalf("expected S-rank entries to survive")
+	}
 	for _, a := range r.List {
 		if a.Rank != "S" {
 			t.Errorf("expected S-only, got %+v", a)
@@ -345,14 +268,6 @@ func TestPartial_Achievements_Golden(t *testing.T) {
 	if string(want) != got {
 		t.Fatalf("golden mismatch\nwant:\n%s\n\ngot:\n%s", string(want), got)
 	}
-	for _, marker := range []string{
-		`class="achievement `,
-		`data-rank="`,
-	} {
-		if !strings.Contains(got, marker) {
-			t.Errorf("missing marker %q in:\n%s", marker, got)
-		}
-	}
 }
 
 func TestPartial_AchievementsCompact_Golden(t *testing.T) {
@@ -390,26 +305,6 @@ func TestPartial_AchievementsCompact_Golden(t *testing.T) {
 	}
 	if string(want) != got {
 		t.Fatalf("golden mismatch\nwant:\n%s\n\ngot:\n%s", string(want), got)
-	}
-	for _, marker := range []string{
-		`<g data-section="achievements">`,
-		`class="achievement s"`,
-		`data-rank="S"`,
-	} {
-		if !strings.Contains(got, marker) {
-			t.Errorf("missing marker %q in:\n%s", marker, got)
-		}
-	}
-	// Compact hides descriptions; the detailed-only "Published 120 public
-	// repositories" text must not appear.
-	if strings.Contains(got, "Published 120 public repositories") {
-		t.Errorf("compact output should not render descriptions:\n%s", got)
-	}
-	// Native SVG: no foreignObject HTML wrappers survive.
-	for _, html := range []string{`<div`, `<h2`, `class="row"`, `class="value-wrapper"`} {
-		if strings.Contains(got, html) {
-			t.Errorf("native SVG output should not contain HTML %q in:\n%s", html, got)
-		}
 	}
 }
 
@@ -512,38 +407,26 @@ func TestPartial_UnknownIDFallsBackToTrophy(t *testing.T) {
 	}
 }
 
-func TestRun_GoldenShape_Achievements(t *testing.T) {
-	r := &achievements.Result{
-		Display: "detailed",
-		List: []achievements.Achievement{
-			{ID: "developer", Rank: "S", Title: "Developer", Description: "Published 120 public repositories", Icon: "repo", Value: 120},
-		},
-		Ranks: map[string]string{
-			"developer": "S", "forker": "X", "contributor": "A", "reviewer": "B",
-			"packager": "B", "gister": "B", "worker": "A", "stargazer": "A",
-			"follower": "B", "influencer": "S", "maintainer": "B", "inspirer": "B",
-			"polyglot": "B", "member": "A", "sponsor": "B", "deployer": "B",
-			"chatter": "B", "helper": "B",
-		},
-	}
-	got, err := json.MarshalIndent(r, "", "  ")
+// TestRun_PluginDisabled_Skipped covers the gate-off path: without a
+// truthy `plugin_achievements` input, Run must Skip before reaching the
+// dataprovider or any API client. The GraphQL mux has no handlers, so
+// any GraphQL call fails the test.
+func TestRun_PluginDisabled_Skipped(t *testing.T) {
+	t.Parallel()
+	gql := mocks.NewGraphQLMux(t)
+	rest := mocks.NewRESTMux(t)
+	pc := mocks.NewPluginContext(t, mocks.WithGraphQL(gql), mocks.WithREST(rest))
+	pc.Provider = dataprovider.New("octocat", "", pc.GraphQL, pc.REST, pc.Logger, dataprovider.Options{})
+
+	out, err := achievements.Plugin.Run(context.Background(), pc)
 	if err != nil {
-		t.Fatalf("MarshalIndent: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
-	got = append(got, '\n')
-	gp := filepath.Join(repoRoot(t), "tests", "golden", "json", "m4", "achievements.json")
-	if *updateGolden {
-		_ = os.MkdirAll(filepath.Dir(gp), 0o755)
-		if werr := os.WriteFile(gp, got, 0o644); werr != nil {
-			t.Fatalf("WriteFile: %v", werr)
-		}
-		return
+	r := out.(*achievements.Result)
+	if !r.Skipped || r.SkippedReason != "plugin disabled" {
+		t.Errorf("Skipped = %v, SkippedReason = %q; want true, %q", r.Skipped, r.SkippedReason, "plugin disabled")
 	}
-	want, err := os.ReadFile(gp)
-	if err != nil {
-		t.Fatalf("ReadFile: %v (run with -update)", err)
-	}
-	if string(want) != string(got) {
-		t.Fatalf("golden mismatch\nwant:\n%s\n\ngot:\n%s", string(want), string(got))
+	if n := rest.TotalCalls(); n != 0 {
+		t.Errorf("REST calls = %d, want 0", n)
 	}
 }

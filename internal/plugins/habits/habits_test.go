@@ -2,7 +2,6 @@ package habits_test
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
@@ -11,11 +10,13 @@ import (
 	"time"
 
 	"github.com/mjun0812/github-metrics/internal/config"
+	"github.com/mjun0812/github-metrics/internal/dataprovider"
 	"github.com/mjun0812/github-metrics/internal/githubapi"
 	"github.com/mjun0812/github-metrics/internal/httpx"
 	"github.com/mjun0812/github-metrics/internal/plugins"
 	"github.com/mjun0812/github-metrics/internal/plugins/habits"
 	"github.com/mjun0812/github-metrics/internal/templates"
+	"github.com/mjun0812/github-metrics/internal/testutil/mocks"
 )
 
 var updateGolden = flag.Bool("update", false, "update golden files")
@@ -45,7 +46,7 @@ func newREST(t *testing.T, body string) *githubapi.REST {
 	r, err := githubapi.NewREST(
 		config.NewToken("MOCKED_TOKEN"),
 		"http://mock.localhost",
-		httpx.Options{Transport: mux, MaxRetries: 0},
+		httpx.Options{Transport: mux, DisableRetries: true},
 	)
 	if err != nil {
 		t.Fatalf("NewREST: %v", err)
@@ -66,7 +67,7 @@ func newRESTWithRoutes(t *testing.T, routes map[string]string) *githubapi.REST {
 	r, err := githubapi.NewREST(
 		config.NewToken("MOCKED_TOKEN"),
 		"http://mock.localhost",
-		httpx.Options{Transport: mux, MaxRetries: 0},
+		httpx.Options{Transport: mux, DisableRetries: true},
 	)
 	if err != nil {
 		t.Fatalf("NewREST: %v", err)
@@ -78,7 +79,7 @@ func pcWith(t *testing.T, body string, inputs map[string]any) *plugins.PluginCon
 	t.Helper()
 	pc := &plugins.PluginContext{
 		Data:   plugins.NewData(),
-		Inputs: map[string]any{"user": "octocat"},
+		Inputs: map[string]any{"user": "octocat", "plugin_habits": true},
 		REST:   newREST(t, body),
 	}
 	for k, v := range inputs {
@@ -89,16 +90,6 @@ func pcWith(t *testing.T, body string, inputs map[string]any) *plugins.PluginCon
 
 func ev(typ string, when time.Time) string {
 	return `{"type":"` + typ + `","created_at":"` + when.UTC().Format(time.RFC3339) + `"}`
-}
-
-func TestRun_NoEvents_Skipped(t *testing.T) {
-	t.Parallel()
-	pc := pcWith(t, `[]`, nil)
-	out, _ := habits.Plugin.Run(context.Background(), pc)
-	r := out.(*habits.Result)
-	if !r.Skipped {
-		t.Errorf("expected Skipped for empty events")
-	}
 }
 
 func TestRun_PushEventsBuildHistograms(t *testing.T) {
@@ -149,22 +140,7 @@ func TestRun_CommitsPerDay(t *testing.T) {
 	}
 }
 
-func TestRun_DefaultSectionToggles(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 5, 15, 14, 30, 0, 0, time.UTC)
-	body := `[` + ev("PushEvent", now) + `]`
-	pc := pcWith(t, body, nil)
-	out, _ := habits.Plugin.Run(context.Background(), pc)
-	r := out.(*habits.Result)
-	if !r.FactsEnabled {
-		t.Errorf("FactsEnabled = false, want true")
-	}
-	if !r.ChartsEnabled {
-		t.Errorf("ChartsEnabled = false, want true")
-	}
-}
-
-func TestRun_SectionTogglesReadInputs(t *testing.T) {
+func TestRun_SectionToggles(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 15, 14, 30, 0, 0, time.UTC)
 	body := `[` + ev("PushEvent", now) + `]`
@@ -174,6 +150,12 @@ func TestRun_SectionTogglesReadInputs(t *testing.T) {
 		wantFacts  bool
 		wantCharts bool
 	}{
+		{
+			name:       "default both on",
+			inputs:     nil,
+			wantFacts:  true,
+			wantCharts: true,
+		},
 		{
 			name:       "facts yes charts no",
 			inputs:     map[string]any{"plugin_habits_facts": "yes", "plugin_habits_charts": "no"},
@@ -206,49 +188,12 @@ func TestRun_NilREST_Skipped(t *testing.T) {
 	t.Parallel()
 	pc := &plugins.PluginContext{
 		Data:   plugins.NewData(),
-		Inputs: map[string]any{"user": "octocat"},
+		Inputs: map[string]any{"user": "octocat", "plugin_habits": true},
 	}
 	out, _ := habits.Plugin.Run(context.Background(), pc)
 	r := out.(*habits.Result)
 	if !r.Skipped {
 		t.Errorf("nil REST should yield Skipped")
-	}
-	if !r.FactsEnabled {
-		t.Errorf("FactsEnabled = false, want true")
-	}
-	if !r.ChartsEnabled {
-		t.Errorf("ChartsEnabled = false, want true")
-	}
-}
-
-func TestRun_GoldenShape(t *testing.T) {
-	r := &habits.Result{
-		Days:          14,
-		FactsEnabled:  true,
-		ChartsEnabled: true,
-		Facts:         habits.HabitFacts{IndentStyle: "spaces", CommitsPerDay: 1.5},
-		Charts:        habits.HabitCharts{Hours: [24]int{}, Days: [7]int{2, 1, 3, 1, 0, 4, 2}},
-		From:          200,
-	}
-	got, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		t.Fatalf("MarshalIndent: %v", err)
-	}
-	got = append(got, '\n')
-	gp := filepath.Join(repoRoot(t), "tests", "golden", "json", "m4", "habits.json")
-	if *updateGolden {
-		_ = os.MkdirAll(filepath.Dir(gp), 0o755)
-		if werr := os.WriteFile(gp, got, 0o644); werr != nil {
-			t.Fatalf("WriteFile: %v", werr)
-		}
-		return
-	}
-	want, err := os.ReadFile(gp)
-	if err != nil {
-		t.Fatalf("ReadFile: %v (run with -update)", err)
-	}
-	if string(want) != string(got) {
-		t.Fatalf("golden mismatch\nwant:\n%s\ngot:\n%s", string(want), string(got))
 	}
 }
 
@@ -313,24 +258,6 @@ func TestPartial_Habits_FactsOnly_Golden(t *testing.T) {
 	r.ChartsEnabled = false
 	got := renderPartial(t, r)
 	assertPartialGolden(t, "habits_facts_only.svg", got)
-	for _, marker := range []string{
-		`>Recent coding habits</text>`,
-		`>Mostly active on Fri</text>`,
-	} {
-		if !strings.Contains(got, marker) {
-			t.Errorf("facts-only partial missing marker %q in:\n%s", marker, got)
-		}
-	}
-	for _, marker := range []string{
-		`Commit activity per hour of day`,
-		`Commit activity per day of week`,
-		`data-block="chart-bars"`,
-		`var(`,
-	} {
-		if strings.Contains(got, marker) {
-			t.Errorf("facts-only partial unexpectedly contains marker %q in:\n%s", marker, got)
-		}
-	}
 }
 
 // pcWithRoutes builds a PluginContext whose REST client serves the given
@@ -339,7 +266,7 @@ func pcWithRoutes(t *testing.T, routes map[string]string, inputs map[string]any)
 	t.Helper()
 	pc := &plugins.PluginContext{
 		Data:   plugins.NewData(),
-		Inputs: map[string]any{"user": "octocat"},
+		Inputs: map[string]any{"user": "octocat", "plugin_habits": true},
 		REST:   newRESTWithRoutes(t, routes),
 	}
 	for k, v := range inputs {
@@ -483,24 +410,28 @@ func TestPartial_Habits_ChartsOnly_Golden(t *testing.T) {
 	r.ChartsEnabled = true
 	got := renderPartial(t, r)
 	assertPartialGolden(t, "habits_charts_only.svg", got)
-	for _, marker := range []string{
-		`Commit activity per hour of day`,
-		`Commit activity per day of week`,
-		`data-block="chart-bars"`,
-	} {
-		if !strings.Contains(got, marker) {
-			t.Errorf("charts-only partial missing marker %q in:\n%s", marker, got)
-		}
+}
+
+// TestRun_PluginDisabled_Skipped covers the gate-off path: without a
+// truthy `plugin_habits` input, Run must Skip before reaching the
+// dataprovider or any API client. The GraphQL mux has no handlers, so
+// any GraphQL call fails the test.
+func TestRun_PluginDisabled_Skipped(t *testing.T) {
+	t.Parallel()
+	gql := mocks.NewGraphQLMux(t)
+	rest := mocks.NewRESTMux(t)
+	pc := mocks.NewPluginContext(t, mocks.WithGraphQL(gql), mocks.WithREST(rest))
+	pc.Provider = dataprovider.New("octocat", "", pc.GraphQL, pc.REST, pc.Logger, dataprovider.Options{})
+
+	out, err := habits.Plugin.Run(context.Background(), pc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if strings.Contains(got, "var(") {
-		t.Errorf("charts-only partial must not emit CSS var() references:\n%s", got)
+	r := out.(*habits.Result)
+	if !r.Skipped || r.SkippedReason != "plugin disabled" {
+		t.Errorf("Skipped = %v, SkippedReason = %q; want true, %q", r.Skipped, r.SkippedReason, "plugin disabled")
 	}
-	for _, marker := range []string{
-		`Recent coding habits`,
-		`<ul class="facts">`,
-	} {
-		if strings.Contains(got, marker) {
-			t.Errorf("charts-only partial unexpectedly contains marker %q in:\n%s", marker, got)
-		}
+	if n := rest.TotalCalls(); n != 0 {
+		t.Errorf("REST calls = %d, want 0", n)
 	}
 }

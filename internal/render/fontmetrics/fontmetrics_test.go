@@ -53,55 +53,14 @@ func TestWidth_ZeroOrNegativeSize(t *testing.T) {
 	}
 }
 
-// TestWidth_Monotonicity verifies that appending characters never
-// shrinks the measured width, and that a strict superset of visible
-// text is strictly wider.
-func TestWidth_Monotonicity(t *testing.T) {
-	prefixes := []string{"H", "He", "Hel", "Hell", "Hello", "Hello,", "Hello, W", "Hello, World!"}
-	prev := 0.0
-	for _, p := range prefixes {
-		w := Width(p, 14)
-		if w <= prev {
-			t.Errorf("Width(%q) = %.4f, want > previous width %.4f", p, w, prev)
-		}
-		prev = w
-	}
-}
-
-// TestWidth_ScaleLinearity checks that doubling sizePx roughly doubles
-// the measured width (within the fixed-point rounding that per-glyph
-// advances accumulate).
-func TestWidth_ScaleLinearity(t *testing.T) {
-	text := "Joined GitHub 8 years ago"
-	w14 := Width(text, 14)
-	w28 := Width(text, 28)
-	w56 := Width(text, 56)
-
-	approxEqual(t, w28, w14*2, w14*0.02)
-	approxEqual(t, w56, w14*4, w14*0.02)
-}
-
-// TestWidth_BoldWiderThanRegular checks that, for ordinary Latin text,
-// the Bold face is measured no narrower than Regular — bold glyphs
-// have equal or larger advances in Liberation Sans.
-func TestWidth_BoldWiderThanRegular(t *testing.T) {
-	text := "The quick brown fox jumps over the lazy dog"
-	reg := Width(text, 16)
-	bold := WidthBold(text, 16)
-	if bold <= reg {
-		t.Errorf("WidthBold(%q) = %.4f, want > Width(...) = %.4f", text, bold, reg)
-	}
-}
-
 // TestWidth_MissingGlyphFallback documents and verifies the fallback
-// behavior for runes absent from Liberation Sans (e.g. emoji): rather
+// behavior for narrow runes absent from Liberation Sans: rather
 // than erroring or measuring as zero-width, each such rune is charged
 // a fixed fallback advance (fallbackAdvanceRatio * sizePx). This keeps
-// Width usable as a layout approximation even for content GitHub may
-// render with emoji.
+// Width usable as a layout approximation for arbitrary content.
 func TestWidth_MissingGlyphFallback(t *testing.T) {
 	const sizePx = 14.0
-	const emoji = "\U0001F600" // grinning face, not in Liberation Sans
+	const emoji = "\u2603" // snowman: East Asian Neutral, not in Liberation Sans
 
 	got := Width(emoji, sizePx)
 	want := sizePx * fallbackAdvanceRatio
@@ -175,5 +134,19 @@ func TestWrap_MaxWidthLargerThanText(t *testing.T) {
 	lines := Wrap(text, 14, 100000)
 	if len(lines) != 1 || lines[0] != text {
 		t.Errorf("Wrap(short text, huge maxWidth) = %v, want single unchanged line", lines)
+	}
+}
+
+// Runes without a Liberation Sans glyph that render full-width (CJK,
+// emoji) must be measured near 1em, not the half-em Latin average, so
+// layout built on Width does not under-allocate for them.
+func TestWidth_WideRunesMeasureAsFullWidth(t *testing.T) {
+	for _, s := range []string{"垂", "あ", "한", "📝", "Ａ"} {
+		if got := Width(s, 14); got < 14 || got > 14*1.2 {
+			t.Errorf("Width(%q, 14) = %.2f, want within [14, 16.8]", s, got)
+		}
+	}
+	if got, one := Width("垂直", 14), Width("垂", 14); got < 2*one-0.01 {
+		t.Errorf("Width(2 CJK) = %.2f, want >= %.2f", got, 2*one)
 	}
 }

@@ -30,7 +30,7 @@ func Compute(ctx context.Context, req Request, deps Deps) (*Result, error)
 ```
 
 - `Request{Login, Repo, Template, Format, Account, Inputs, Parallel, Die}`
-- `Deps{Settings, Metadata, Logger, HTTPClient, REST, GraphQL, Render}`
+- `Deps{Logger, HTTPClient, REST, GraphQL, Render}`
 - `Result{Data *plugins.Data, Errors []error, Output []byte, MIME string, Provider plugins.Provider}`
 
 `Compute` flow:
@@ -40,7 +40,7 @@ func Compute(ctx context.Context, req Request, deps Deps) (*Result, error)
 3. **Rate gate**: checks remaining GitHub API rate limit at startup (#529).
 4. **dataprovider construction**: `dataprovider.New(...)` returns a Provider that fetches the profile / repositories / calendar **lazily and with memoization** (#603). Shared data is consolidated here, and each plugin reads from it to avoid duplicate fetches.
 5. **core plugin (Stage 1)**: `core.Plugin.Run` interprets `config_*` and populates `data.Config` / `data.Computed`.
-6. **individual plugins (Stage 2)**: `core.RunPlugins(ctx, pc, req.Parallel)` runs the remaining registered plugins in parallel using `golang.org/x/sync/errgroup`. Each result is stored in `data.Plugins[name]`, and errors are stored per-plugin in the same map (when `die=false`, they are aggregated into the footer).
+6. **individual plugins (Stage 2)**: `core.RunPlugins(ctx, pc, req.Parallel)` runs the remaining registered plugins in parallel using `golang.org/x/sync/errgroup`. Each result is stored in `data.Plugins[name]`, and errors are stored per-plugin in the same map (when `die=false`, they are aggregated into the footer). `RunPlugins` runs every plugin; each plugin checks `plugin_<name>` itself and returns a Skipped result without calling the API when it is disabled (#823).
 7. **output dispatch (Stage 3)**: `engine/dispatch.go` branches on `format`.
 
 Output dispatch (`dispatchOutput`):
@@ -61,20 +61,19 @@ Each plugin is a self-contained subpackage under `internal/plugins/<name>/` that
 ```go
 type Plugin interface {
     Name() string
-    Requires() []DataKey
     Run(ctx context.Context, pc *PluginContext) (any, error)
 }
 ```
 
 - The `any` returned by `Run` is that plugin's result and is stored in `data.Plugins[name]`. Other plugins can reference it via `PluginContext.Imports.Get(name)`.
-- `Requires()` declares the shared data keys the plugin depends on (used for the dataprovider's fetch planning).
+- Plugins read shared data on demand through `PluginContext.Provider` (the lazy, memoized dataprovider). Plugins do not declare their data dependencies up front, and nothing is prefetched.
 - `metadata.yml` is bundled via `//go:embed` as `assets/plugins/<name>/metadata.yml` and holds the input definitions, `supports` (supported account types), and required scopes.
 
 ### 3.2 Special plugins
 
 - **`core`**: not a data plugin but an orchestration plugin responsible for Stage 1 config injection and the Stage 2 parallel runner (`internal/plugins/core`).
 - **`base`**: an opt-in plugin that draws the activity+community / repositories summary panel. It reads only from `dataprovider`.
-- `internal/plugins/pluginutil` and `internal/plugins/requirestesting` are not plugins but shared helpers.
+- `internal/plugins/pluginutil` is not a plugin but a shared helper package.
 
 See [`scope.md`](scope.md) for the list and classification of adopted plugins.
 
@@ -106,12 +105,12 @@ internal/
 ├── dataprovider/      … lazy, memoized fetching of shared data (#603)
 ├── config/            … settings / metadata / input normalization
 ├── githubapi/         … REST (httpx) + GraphQL (genqlient) clients + scope detection
-├── plugins/           … individual plugins (core / base / header / 19 data plugins)
+├── plugins/           … individual plugins (core / base / 19 user-visible plugins including header)
 ├── templates/         … classic / repository + shared chrome package
 ├── render/            … SVG decoration pipeline + resvg rasterization + fontmetrics
 ├── format/            … number/date formatters
 └── ...                … logger / errors / httpx, etc.
-assets/                … plugin / template metadata, CSS, fonts bundled via //go:embed
+assets/                … plugin / template metadata, CSS, octicon data bundled via //go:embed
 tests/                 … golden / compliance / integration
 ```
 

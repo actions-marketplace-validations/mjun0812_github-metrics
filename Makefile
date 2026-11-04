@@ -19,7 +19,7 @@ GOVULNCHECK_VERSION   := latest
 GOFUMPT_VERSION       := latest
 LEFTHOOK_VERSION      := latest
 
-.PHONY: all build build-cli test test-resvg test-heavy test-race lint vet bench gen \
+.PHONY: all build build-cli test test-resvg test-heavy test-race lint vet gen \
         gen-octicons verify-octicons gen-action-yml docker docker-build docker-run-cli \
         docker-smoke release-dry-run \
         tools hooks-install hooks-run hooks-uninstall \
@@ -43,7 +43,6 @@ help:
 	@echo "  test-race           Run tests with the race detector"
 	@echo "  vet                 Run go vet ./..."
 	@echo "  lint                Run golangci-lint and govulncheck"
-	@echo "  bench               Run benchmarks (go test -bench=. -run=^$$)"
 	@echo "  gen                 Run code generation (go generate ./...)"
 	@echo "  gen-octicons        Regenerate assets/octicons/data.json from @primer/octicons"
 	@echo "  verify-octicons     Ensure committed assets/octicons/data.json matches gen-octicons output"
@@ -53,8 +52,8 @@ help:
 	@echo "  hooks-install       Wire the lefthook git hooks (run once per checkout after \`make tools\`)"
 	@echo "  hooks-run           Run every pre-commit hook over the whole tree"
 	@echo "  hooks-uninstall     Remove the lefthook git hooks"
-	@echo "  check-compat        Diff metadata keys against ./org_repo upstream (placeholder; T058 owns the impl)"
-	@echo "  sync-assets         Sync assets/ from ./org_repo (placeholder until T024 lands)"
+	@echo "  check-compat        Diff metadata keys against ./org_repo upstream"
+	@echo "  sync-assets         Sync assets/ from ./org_repo"
 	@echo "  clean               Remove bin/ and other build artifacts"
 
 build: $(addprefix $(BIN_DIR)/, $(BINARIES))
@@ -67,8 +66,9 @@ $(BIN_DIR)/%: cmd/%/main.go
 
 # Generate action.yml from assets/plugins/<slug>/metadata.yml + core
 # inputs. Driven by internal/tools/gen-action-yml/. Must be re-run
-# whenever a plugin metadata.yml changes; CI gates `git diff --quiet
-# action.yml` after running this target.
+# whenever a plugin metadata.yml changes;
+# TestGenerate_MatchesCommittedActionYML (run by `go test ./...` in CI)
+# fails when the committed action.yml differs from this target's output.
 gen-action-yml:
 	$(GO) run ./internal/tools/gen-action-yml --output ./action.yml
 
@@ -121,9 +121,6 @@ vet:
 lint:
 	golangci-lint run --timeout=10m
 	govulncheck ./...
-
-bench:
-	$(GO) test -bench=. -benchmem -run=^$$ ./...
 
 gen:
 	$(GO) generate ./...
@@ -189,8 +186,8 @@ hooks-uninstall:
 # `docs`           — regenerates docs/plugins/*.md and the README
 #                    plugins-gallery AUTOGEN block from
 #                    assets/plugins/*/metadata.yml. No token needed.
-# `docs-samples`   — renders the 21 plugin sample SVGs
-#                    via scripts/gen-doc-samples.sh. Requires
+# `docs-samples`   — renders the plugin sample SVGs
+#                    listed in scripts/samples.json via scripts/gen-doc-samples.sh. Requires
 #                    GITHUB_TOKEN and the docker image
 #                    github-metrics:local (which bundles resvg).
 # `docs-examples`  — convenience target: run docs-samples then docs in
@@ -215,14 +212,8 @@ docs-lint:
 check-compat:
 	$(GO) run ./internal/tools/check-compat
 
-check-output-compat:
-	$(GO) test ./tests/compatibility/...
-
 sync-assets:
 	./scripts/sync-assets.sh
-
-sync-fixtures:
-	$(GO) run ./internal/tools/sync-fixtures --user octocat
 
 clean:
 	rm -rf $(BIN_DIR)

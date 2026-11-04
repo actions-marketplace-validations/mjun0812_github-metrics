@@ -34,12 +34,6 @@ type activityPlugin struct{}
 
 func (p *activityPlugin) Name() string { return Name }
 
-func (p *activityPlugin) Requires() []plugins.DataKey {
-	// activity reads from pc.Data fields populated by base; it does not
-	// call Provider directly.
-	return []plugins.DataKey{}
-}
-
 // Result is the JSON payload the plugin publishes under
 // data.Plugins["activity"]. Field set mirrors upstream
 // data.plugins.activity.
@@ -129,6 +123,9 @@ type inputs struct {
 func (p *activityPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any, error) {
 	if pc == nil || pc.Data == nil {
 		return nil, nil
+	}
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{Skipped: true, SkippedReason: "plugin disabled", Events: []ActivityEvent{}}, nil
 	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return &Result{Skipped: true, SkippedReason: reason, Events: []ActivityEvent{}}, nil

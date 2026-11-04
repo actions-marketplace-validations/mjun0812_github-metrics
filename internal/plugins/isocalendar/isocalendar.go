@@ -15,6 +15,7 @@ import (
 
 	"github.com/mjun0812/github-metrics/internal/githubapi"
 	"github.com/mjun0812/github-metrics/internal/plugins"
+	"github.com/mjun0812/github-metrics/internal/plugins/pluginutil"
 )
 
 // Name is the canonical plugin slug.
@@ -30,10 +31,6 @@ func init() {
 type isocalendarPlugin struct{}
 
 func (p *isocalendarPlugin) Name() string { return Name }
-
-func (p *isocalendarPlugin) Requires() []plugins.DataKey {
-	return []plugins.DataKey{plugins.KeyUser, plugins.KeyCommitCalendar}
-}
 
 // Result is the JSON payload published under data.Plugins["isocalendar"].
 type Result struct {
@@ -72,6 +69,13 @@ type Streak struct {
 func (p *isocalendarPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any, error) {
 	if pc == nil || pc.Data == nil {
 		return nil, nil
+	}
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Weeks:         []ISOWeek{},
+		}, nil
 	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return &Result{

@@ -14,8 +14,18 @@ name: Release
 #
 # Pipeline ordering: a `docker-smoke` gate job builds the image
 # locally (amd64) and runs `metrics-cli --help` + size-budget
-# assertion (FR-006). If it fails, release-docker and release-binary
+# assertion (FR-006). If it fails, build-image and release-binary
 # do not start — nothing oversized lands on GHCR.
+#
+# Action image pinning: the committed action.yml on main says
+# `image: 'Dockerfile'`, which would make every `uses:` caller rebuild
+# the image (with VERSION=dev) on their runner. Once the image is
+# published and signed and the GitHub Release exists, the
+# pin-action-image job commits an action.yml regenerated with
+# VERSION=<tag> (`image: 'docker://ghcr.io/...:<tag>'`) on top of the
+# tagged commit and force-moves the semver tag to that commit;
+# update-floating-tag then points vMAJOR at the same commit. The
+# pinned commit lives only under the tags, never on main.
 #
 # Dry-run: `workflow_dispatch` with `dry_run=true` (default) runs
 # the full build chain but skips GHCR push, GitHub Release upload,
@@ -43,6 +53,10 @@ permissions:
 
 env:
   REGISTRY_IMAGE: ghcr.io/mjun0812/github-metrics
+  # Keep in lockstep with GO_VERSION in go-ci.yml so the released
+  # binaries carry the same stdlib security fixes CI is pinned for.
+  # go.mod's `go` line is only the minimum language version.
+  GO_VERSION: "1.26.10"
 
 jobs:
   docker-smoke:
@@ -55,7 +69,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Run M10 docker-smoke (build + --help + ≤900MB assertion)
         # Inlined from the Makefile `docker-smoke` target so the step
@@ -109,18 +123,18 @@ jobs:
 
       - name: Log in to GHCR
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v3.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v3.13.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build and push image by digest (${{ matrix.platform }})
         id: build
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.7.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -217,14 +231,14 @@ jobs:
           merge-multiple: true
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v3.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v3.13.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Create manifest list + tag + push
         working-directory: /tmp/digests
@@ -274,7 +288,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Install gh CLI
         # Pin a known gh version instead of relying on whatever the
@@ -385,9 +399,66 @@ jobs:
               --title "${TAG}"
           fi
 
+  # Re-point the semver tag at a commit whose action.yml runs the
+  # image published above instead of building the Dockerfile on the
+  # caller's runner. Runs for every published tag, pre-releases and
+  # back-ports included, because each of them has its own
+  # `${REGISTRY_IMAGE}:<tag>` image.
+  #
+  # The tag is pushed with GITHUB_TOKEN, whose pushes do not trigger
+  # workflow runs, so moving the tag does not re-run this release.
+  pin-action-image:
+    name: Pin action.yml to the published image
+    needs: [merge-manifest, release-binary]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      github.event.inputs.dry_run != 'true'
+    permissions:
+      contents: write
+    outputs:
+      release_sha: ${{ steps.pin.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Assert the image is pullable without credentials
+        # This job never logs in to GHCR, so the inspect runs
+        # anonymously, exactly like a `uses:` caller's runner pulling
+        # the image. It fails when the tag is missing or the GHCR
+        # package is not public, before any tag is moved.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: docker buildx imagetools inspect "${REGISTRY_IMAGE}:${TAG}"
+
+      - name: Commit pinned action.yml + force-move the semver tag
+        id: pin
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG}" go run ./internal/tools/gen-action-yml --output ./action.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit \
+            -m "release: pin action.yml to ${REGISTRY_IMAGE}:${TAG}" \
+            -m "Source commit: ${GITHUB_SHA}" \
+            -- action.yml
+          release_sha="$(git rev-parse HEAD)"
+          git tag -f "${TAG}" "${release_sha}"
+          git push origin --force "refs/tags/${TAG}"
+          echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Moved ${TAG} → ${release_sha} (source ${GITHUB_SHA})"
+
   update-floating-tag:
     name: Advance vMAJOR floating tag (stable releases only)
-    needs: [merge-manifest, release-binary]
+    needs: pin-action-image
     runs-on: ubuntu-latest
     # Only run on tag pushes (not workflow_dispatch from a branch) and
     # only when not in dry-run mode. The decision step below also
@@ -399,12 +470,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Check out the pinned commit explicitly: pin-action-image has
+      # already moved the pushed tag away from GITHUB_SHA, and checking
+      # out the event ref fails actions/checkout's tag-target check.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.pin-action-image.outputs.release_sha }}
           fetch-depth: 0
 
       - name: Compute major version + advance decision
         id: decide
+        env:
+          RELEASE_SHA: ${{ needs.pin-action-image.outputs.release_sha }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
@@ -444,13 +521,13 @@ jobs:
           fi
 
           echo "floating=${FLOATING}" >> "${GITHUB_OUTPUT}"
-          echo "Will advance ${FLOATING} → $(git rev-parse HEAD) (= ${TAG})"
+          echo "Will advance ${FLOATING} → ${RELEASE_SHA} (= ${TAG})"
 
       - name: Force-update floating tag
         if: steps.decide.outputs.floating != ''
         env:
           FLOATING: ${{ steps.decide.outputs.floating }}
-          TARGET_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ needs.pin-action-image.outputs.release_sha }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail

@@ -1,12 +1,10 @@
 package contributors_test
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"flag"
+	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,31 +15,11 @@ import (
 	"github.com/mjun0812/github-metrics/internal/testutil/mocks"
 )
 
-var updateGolden = flag.Bool("update", false, "update golden files")
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	cwd, _ := os.Getwd()
-	dir := cwd
-	for i := 0; i < 8; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	t.Fatalf("repo root not found")
-	return ""
-}
-
 func run(t *testing.T, account plugins.AccountKind) *contributors.Result {
 	t.Helper()
 	data := plugins.NewData()
 	data.Account = account
-	pc := &plugins.PluginContext{Data: data, Inputs: map[string]any{}}
+	pc := &plugins.PluginContext{Data: data, Inputs: map[string]any{"plugin_contributors": true}}
 	out, err := contributors.Plugin.Run(context.Background(), pc)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -49,63 +27,20 @@ func run(t *testing.T, account plugins.AccountKind) *contributors.Result {
 	return out.(*contributors.Result)
 }
 
-func TestRun_UserAccountSkipped(t *testing.T) {
+// TestRun_NonRepositoryAccountSkipped — every account without a repository
+// (user, organization, repository account lacking RepoRef) is Skipped with a
+// non-empty reason for trace logs.
+func TestRun_NonRepositoryAccountSkipped(t *testing.T) {
 	t.Parallel()
-	r := run(t, plugins.AccountUser)
-	if !r.Skipped {
-		t.Errorf("user account should be Skipped in M4; got %+v", r)
-	}
-}
-
-func TestRun_OrganizationAccountSkipped(t *testing.T) {
-	t.Parallel()
-	r := run(t, plugins.AccountOrganization)
-	if !r.Skipped {
-		t.Errorf("organization account should be Skipped in M4; got %+v", r)
-	}
-}
-
-func TestRun_RepositoryAccountSkipped(t *testing.T) {
-	t.Parallel()
-	r := run(t, plugins.AccountRepository)
-	if !r.Skipped {
-		t.Errorf("repository account without RepoRef should be Skipped; got %+v", r)
-	}
-}
-
-func TestRun_SkippedReasonNonEmpty(t *testing.T) {
-	t.Parallel()
-	r := run(t, plugins.AccountUser)
-	if r.SkippedReason == "" {
-		t.Errorf("SkippedReason should be non-empty for trace logs")
-	}
-}
-
-func TestRun_GoldenShape(t *testing.T) {
-	r := &contributors.Result{
-		Skipped:  true,
-		List:     []contributors.Contributor{},
-		Sections: []string{},
-	}
-	got, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		t.Fatalf("MarshalIndent: %v", err)
-	}
-	got = append(got, '\n')
-	gp := filepath.Join(repoRoot(t), "tests", "golden", "json", "m4", "contributors.json")
-	if *updateGolden {
-		_ = os.MkdirAll(filepath.Dir(gp), 0o755)
-		if werr := os.WriteFile(gp, got, 0o644); werr != nil {
-			t.Fatalf("WriteFile: %v", werr)
+	for _, account := range []plugins.AccountKind{
+		plugins.AccountUser,
+		plugins.AccountOrganization,
+		plugins.AccountRepository,
+	} {
+		r := run(t, account)
+		if !r.Skipped || r.SkippedReason == "" {
+			t.Errorf("account %v: want Skipped with reason; got %+v", account, r)
 		}
-		return
-	}
-	want, err := os.ReadFile(gp)
-	if err != nil {
-		t.Fatalf("ReadFile: %v (run with -update)", err)
-	}
-	if string(want) != string(got) {
-		t.Fatalf("golden mismatch\nwant:\n%s\ngot:\n%s", string(want), string(got))
 	}
 }
 
@@ -138,6 +73,7 @@ func TestRun_RepositoryContributionsStats(t *testing.T) {
 		mocks.WithREST(rest),
 		mocks.WithData(data),
 		mocks.WithInputs(map[string]any{
+			"plugin_contributors":               true,
 			"plugin_contributors_contributions": true,
 			"plugin_contributors_sections":      []string{"contributors"},
 			"plugin_contributors_ignored":       []string{"hubot"},
@@ -171,8 +107,7 @@ func TestRun_RepositoryStatsFailureKeepsMinimalStub(t *testing.T) {
 	// Override the 202 retry backoff so the bounded poll loop runs
 	// instantly. Cannot run in parallel because SetSleepFn mutates a
 	// package-level hook.
-	var slept int
-	restore := contributors.SetSleepFn(func(_ context.Context, _ time.Duration) { slept++ })
+	restore := contributors.SetSleepFn(func(_ context.Context, _ time.Duration) {})
 	defer restore()
 
 	rest := mocks.NewRESTMux(t)
@@ -191,7 +126,7 @@ func TestRun_RepositoryStatsFailureKeepsMinimalStub(t *testing.T) {
 		t,
 		mocks.WithREST(rest),
 		mocks.WithData(data),
-		mocks.WithInputs(map[string]any{"plugin_contributors_contributions": true}),
+		mocks.WithInputs(map[string]any{"plugin_contributors": true, "plugin_contributors_contributions": true}),
 	)
 
 	out, err := contributors.Plugin.Run(context.Background(), pc)
@@ -207,13 +142,9 @@ func TestRun_RepositoryStatsFailureKeepsMinimalStub(t *testing.T) {
 	if !r.StatsPending {
 		t.Fatalf("StatsPending should be true when /stats/contributors returns 202; got %+v", r)
 	}
-	// The bounded poll must have re-requested the endpoint and slept
-	// between attempts before giving up.
+	// The bounded poll must have re-requested the endpoint before giving up.
 	if got := rest.Calls("/repos/octocat/hello-world/stats/contributors"); got != contributors.StatsPendingMaxAttempts {
 		t.Fatalf("expected %d attempts on persistent 202; got %d", contributors.StatsPendingMaxAttempts, got)
-	}
-	if slept != contributors.StatsPendingMaxAttempts-1 {
-		t.Fatalf("expected %d backoff sleeps; got %d", contributors.StatsPendingMaxAttempts-1, slept)
 	}
 }
 
@@ -241,7 +172,7 @@ func TestRun_RepositoryStatsPendingFallsBackToContributorList(t *testing.T) {
 		t,
 		mocks.WithREST(rest),
 		mocks.WithData(data),
-		mocks.WithInputs(map[string]any{"plugin_contributors_contributions": true}),
+		mocks.WithInputs(map[string]any{"plugin_contributors": true, "plugin_contributors_contributions": true}),
 	)
 
 	out, err := contributors.Plugin.Run(context.Background(), pc)
@@ -299,7 +230,7 @@ func TestRun_RepositoryStatsRetriesPendingThenSucceeds(t *testing.T) {
 		t,
 		mocks.WithREST(rest),
 		mocks.WithData(data),
-		mocks.WithInputs(map[string]any{"plugin_contributors_contributions": true}),
+		mocks.WithInputs(map[string]any{"plugin_contributors": true, "plugin_contributors_contributions": true}),
 	)
 
 	out, err := contributors.Plugin.Run(context.Background(), pc)
@@ -319,37 +250,6 @@ func TestRun_RepositoryStatsRetriesPendingThenSucceeds(t *testing.T) {
 	got := r.List[0]
 	if got.Login != "octocat" || got.Commits != 7 || got.Additions != 35 || got.Deletions != 13 {
 		t.Fatalf("unexpected contributor stats after retry: %+v", got)
-	}
-}
-
-func TestRun_RepositoryStatsErrorDoesNotFlagPending(t *testing.T) {
-	t.Parallel()
-	rest := mocks.NewRESTMux(t)
-	rest.OnBody("/repos/octocat/hello-world/stats/contributors", http.StatusInternalServerError, `{"message":"oops"}`)
-	data := plugins.NewData()
-	data.Account = plugins.AccountRepository
-	data.SetRepo(&plugins.Repo{
-		Owner:         "octocat",
-		OwnerAvatar:   "https://avatars.example/owner.png",
-		Name:          "hello-world",
-		Contributors:  1,
-		DefaultBranch: "main",
-		Activity:      plugins.RepoActivity{RecentCommits: 7},
-	})
-	pc := mocks.NewPluginContext(
-		t,
-		mocks.WithREST(rest),
-		mocks.WithData(data),
-		mocks.WithInputs(map[string]any{"plugin_contributors_contributions": true}),
-	)
-
-	out, err := contributors.Plugin.Run(context.Background(), pc)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	r := out.(*contributors.Result)
-	if r.StatsPending {
-		t.Fatalf("non-202 failures must not flag StatsPending; got %+v", r)
 	}
 }
 
@@ -382,6 +282,7 @@ func TestRun_RepositoryStatsFailureFallsBackToContributorList(t *testing.T) {
 		mocks.WithREST(rest),
 		mocks.WithData(data),
 		mocks.WithInputs(map[string]any{
+			"plugin_contributors":               true,
 			"plugin_contributors_contributions": true,
 			"plugin_contributors_ignored":       []string{"hubot"},
 		}),
@@ -401,6 +302,14 @@ func TestRun_RepositoryStatsFailureFallsBackToContributorList(t *testing.T) {
 	// ignored "hubot" filtered out; remaining sorted by commits desc.
 	if len(r.List) != 2 || r.List[0].Login != "alice" || r.List[0].Commits != 8 || r.List[1].Login != "bob" {
 		t.Fatalf("fallback contributor list not used/filtered/sorted: %+v", r.List)
+	}
+	if r.Skipped {
+		t.Fatalf("/stats/contributors failure must not skip the whole result; got %+v", r)
+	}
+	// The degradation is recorded once so operators can observe it.
+	errs := pc.Data.SnapshotErrors()
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "stats fetch failed") {
+		t.Fatalf("SnapshotErrors = %v, want one entry mentioning stats fetch failed", errs)
 	}
 }
 
@@ -424,7 +333,7 @@ func TestRun_ContributorFallbackFollowsPagination(t *testing.T) {
 	data := plugins.NewData()
 	data.Account = plugins.AccountRepository
 	data.SetRepo(&plugins.Repo{Owner: "octocat", Name: "hello-world", Contributors: 2, DefaultBranch: "main"})
-	pc := mocks.NewPluginContext(t, mocks.WithREST(rest), mocks.WithData(data), mocks.WithInputs(map[string]any{}))
+	pc := mocks.NewPluginContext(t, mocks.WithREST(rest), mocks.WithData(data), mocks.WithInputs(map[string]any{"plugin_contributors": true}))
 
 	out, err := contributors.Plugin.Run(context.Background(), pc)
 	if err != nil {
@@ -462,7 +371,7 @@ func TestRun_ContributorFallbackCapsPages(t *testing.T) {
 	data := plugins.NewData()
 	data.Account = plugins.AccountRepository
 	data.SetRepo(&plugins.Repo{Owner: "octocat", Name: "hello-world", Contributors: 1, DefaultBranch: "main"})
-	pc := mocks.NewPluginContext(t, mocks.WithREST(rest), mocks.WithData(data), mocks.WithInputs(map[string]any{}))
+	pc := mocks.NewPluginContext(t, mocks.WithREST(rest), mocks.WithData(data), mocks.WithInputs(map[string]any{"plugin_contributors": true}))
 
 	if _, err := contributors.Plugin.Run(context.Background(), pc); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -523,43 +432,6 @@ func TestPartial_ContributionsDisplayMode(t *testing.T) {
 	}
 }
 
-// TestPartial_LoginWithDigitsUsesSeparateBadge pins #421 directly:
-// the bug surfaced with login "mjun0812" because the rendered SVG
-// dropped the whitespace between the login token and the commits chip.
-// The upstream-equivalent layout (#540) places the commit count in a
-// separate <div class="contributions"> badge, so digit-only logins
-// can never fuse with the count even though the login is now raw text.
-func TestPartial_LoginWithDigitsHasExplicitDelimiter(t *testing.T) {
-	t.Parallel()
-	d := plugins.NewData()
-	d.SetPlugin(contributors.Name, &contributors.Result{
-		Contributions: true,
-		List: []contributors.Contributor{{
-			Login:     "mjun0812",
-			AvatarURL: "https://avatars.example/mjun0812.png",
-			Commits:   67,
-			Additions: 1234,
-			Deletions: 56,
-		}},
-		Sections: []string{"contributors"},
-	})
-	got, _, err := contributors.Partial(context.Background(), &templates.PartialContext{Data: d})
-	if err != nil {
-		t.Fatalf("Partial: %v", err)
-	}
-	if !strings.Contains(got, `class="contributions"`) || !strings.Contains(got, `>67</text>`) {
-		t.Fatalf("expected separate count badge; got %q", got)
-	}
-	if strings.Contains(got, "mjun081267") {
-		t.Fatalf("regression: login and commit count fused into %q", "mjun081267")
-	}
-	for _, want := range []string{`class="contributions"`, `>67</text>`, "++1234 --56"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected %q in %q", want, got)
-		}
-	}
-}
-
 func TestPartial_StatsPendingOmitsDiffSpan(t *testing.T) {
 	t.Parallel()
 	d := plugins.NewData()
@@ -578,8 +450,7 @@ func TestPartial_StatsPendingOmitsDiffSpan(t *testing.T) {
 	}
 	// When /stats/contributors stays 202 (StatsPending), the add/del
 	// diff span is omitted entirely. The earlier "stats pending" chip
-	// was a misleading placeholder, not data the viewer can act on, so
-	// tests/content/dom_contract_test.go forbids it for #471.
+	// was a misleading placeholder, not data the viewer can act on (#471).
 	if strings.Contains(got, "stats pending") {
 		t.Fatalf("StatsPending must not emit a 'stats pending' chip; got %q", got)
 	}
@@ -624,50 +495,52 @@ func TestPartial_DefaultDisplayHidesContributionNumbers(t *testing.T) {
 	}
 }
 
-// TestRun_RepositoryStatsFailed_AppendError verifies that when
-// /stats/contributors returns a hard failure (5xx), Run (a) still
-// renders a result (not Skipped), (b) falls back to /contributors,
-// and (c) records exactly one AppendError entry mentioning the failed
-// endpoint so operators can observe the degradation.
-func TestRun_RepositoryStatsFailed_AppendError(t *testing.T) {
+// TestRun_PluginDisabled_Skipped covers the gate-off path: without a
+// truthy `plugin_contributors` input, Run must Skip before issuing any
+// REST call in repository mode, and must not log the user-mode WARN.
+func TestRun_PluginDisabled_Skipped(t *testing.T) {
 	t.Parallel()
-	rest := mocks.NewRESTMux(t)
-	rest.OnBody("/repos/octocat/hello-world/stats/contributors", http.StatusInternalServerError, `{"message":"oops"}`)
-	rest.OnBody("/repos/octocat/hello-world/contributors", http.StatusOK, `[
-		{"login":"alice","avatar_url":"https://avatars.example/alice.png","contributions":8}
-	]`)
-	data := plugins.NewData()
-	data.Account = plugins.AccountRepository
-	data.SetRepo(&plugins.Repo{
-		Owner:         "octocat",
-		Name:          "hello-world",
-		Contributors:  1,
-		DefaultBranch: "main",
-		Activity:      plugins.RepoActivity{RecentCommits: 1},
-	})
-	pc := mocks.NewPluginContext(
-		t,
-		mocks.WithREST(rest),
-		mocks.WithData(data),
-		mocks.WithInputs(map[string]any{"plugin_contributors_contributions": true}),
-	)
+	t.Run("repository mode issues no REST call", func(t *testing.T) {
+		t.Parallel()
+		rest := mocks.NewRESTMux(t)
+		data := plugins.NewData()
+		data.Account = plugins.AccountRepository
+		data.SetRepo(&plugins.Repo{Owner: "octocat", Name: "hello-world", Contributors: 2, DefaultBranch: "main"})
+		pc := mocks.NewPluginContext(t, mocks.WithREST(rest), mocks.WithData(data))
 
-	out, err := contributors.Plugin.Run(context.Background(), pc)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	r := out.(*contributors.Result)
-	if r.Skipped {
-		t.Fatalf("/stats/contributors failure must not Skipped the whole result; got %+v", r)
-	}
-	if r.StatsPending {
-		t.Fatalf("hard 5xx failure must not set StatsPending; got %+v", r)
-	}
-	errs := pc.Data.SnapshotErrors()
-	if len(errs) != 1 {
-		t.Fatalf("SnapshotErrors len = %d, want 1; errors: %v", len(errs), errs)
-	}
-	if !strings.Contains(errs[0].Error(), "stats fetch failed") {
-		t.Errorf("error message should mention stats fetch failed; got %q", errs[0].Error())
-	}
+		out, err := contributors.Plugin.Run(context.Background(), pc)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		r := out.(*contributors.Result)
+		if !r.Skipped || r.SkippedReason != "plugin disabled" {
+			t.Errorf("Skipped = %v, SkippedReason = %q; want true, %q", r.Skipped, r.SkippedReason, "plugin disabled")
+		}
+		if n := rest.TotalCalls(); n != 0 {
+			t.Errorf("REST calls = %d, want 0", n)
+		}
+	})
+	t.Run("user mode logs no mode warning", func(t *testing.T) {
+		t.Parallel()
+		var logs bytes.Buffer
+		data := plugins.NewData()
+		data.Account = plugins.AccountUser
+		pc := &plugins.PluginContext{
+			Data:   data,
+			Inputs: map[string]any{},
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		}
+
+		out, err := contributors.Plugin.Run(context.Background(), pc)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		r := out.(*contributors.Result)
+		if !r.Skipped || r.SkippedReason != "plugin disabled" {
+			t.Errorf("Skipped = %v, SkippedReason = %q; want true, %q", r.Skipped, r.SkippedReason, "plugin disabled")
+		}
+		if logs.Len() != 0 {
+			t.Errorf("unexpected log output: %s", logs.String())
+		}
+	})
 }

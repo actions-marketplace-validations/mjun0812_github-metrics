@@ -32,12 +32,6 @@ type contributorsPlugin struct{}
 
 func (p *contributorsPlugin) Name() string { return Name }
 
-func (p *contributorsPlugin) Requires() []plugins.DataKey {
-	// contributors is repo-mode only and reads pc.Data.Computed.RepositoryList;
-	// it does not call Provider directly.
-	return []plugins.DataKey{}
-}
-
 // Result is the JSON payload published under data.Plugins["contributors"].
 type Result struct {
 	Skipped       bool          `json:"skipped,omitempty"`
@@ -76,6 +70,16 @@ func (p *contributorsPlugin) Run(ctx context.Context, pc *plugins.PluginContext)
 		return nil, nil
 	}
 	in := parseInputs(pc.Inputs)
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Mode:          plugins.AggregationMode(pc.Data),
+			Contributions: in.contributions,
+			List:          []Contributor{},
+			Sections:      []string{},
+		}, nil
+	}
 	if r := pc.Data.RepoRef(); r != nil {
 		// Repo-mode: keep the existing minimal fallback from
 		// base.FetchRepo, then replace it with detailed REST stats when

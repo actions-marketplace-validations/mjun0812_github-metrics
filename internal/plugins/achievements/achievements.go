@@ -75,14 +75,6 @@ type achievementsPlugin struct{}
 
 func (p *achievementsPlugin) Name() string { return Name }
 
-func (p *achievementsPlugin) Requires() []plugins.DataKey {
-	return []plugins.DataKey{
-		plugins.KeyUser,
-		plugins.KeyRepositories,
-		plugins.KeyRepositorySummary,
-	}
-}
-
 // Result is the JSON payload published under data.Plugins["achievements"].
 type Result struct {
 	Skipped       bool              `json:"skipped,omitempty"`
@@ -419,6 +411,15 @@ func (p *achievementsPlugin) Run(ctx context.Context, pc *plugins.PluginContext)
 		return nil, nil
 	}
 	in := parseInputs(pc.Inputs)
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Display:       in.display,
+			List:          []Achievement{},
+			Ranks:         map[string]string{},
+		}, nil
+	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return &Result{
 			Skipped:       true,

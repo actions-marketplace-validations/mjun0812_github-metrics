@@ -88,15 +88,13 @@
       "years": []
     },
     "contributors": {
-      "base": "master",
+      "base": "",
       "contributions": false,
-      "head": "master",
+      "head": "",
       "list": [],
       "mode": "repo",
-      "sections": [
-        "contributors"
-      ],
-      "skipped": false,
+      "sections": [],
+      "skipped": true,
       "stats_pending": false
     },
     "habits": {
@@ -225,6 +223,14 @@
     "languages.indepth": {
       "analyzed": [],
       "errors": null,
+      "favorites": null,
+      "other": {
+        "color": "",
+        "count": 0,
+        "name": "",
+        "size": 0,
+        "value": 0
+      },
       "repositories": {},
       "skipped": true,
       "total": {
@@ -233,8 +239,11 @@
       }
     },
     "languages.recent": {
+      "commits": 0,
       "days": 14,
       "favorites": [],
+      "files": 0,
+      "latest": 0,
       "load": 100,
       "other": {
         "color": "",
@@ -244,7 +253,8 @@
         "value": 0
       },
       "repos": [],
-      "skipped": true
+      "skipped": true,
+      "total": 0
     },
     "notable": {
       "list": [],

@@ -51,10 +51,6 @@ type repositoriesPlugin struct{}
 
 func (p *repositoriesPlugin) Name() string { return Name }
 
-func (p *repositoriesPlugin) Requires() []plugins.DataKey {
-	return []plugins.DataKey{plugins.KeyRepositories, plugins.KeyUser}
-}
-
 // Result is the JSON payload published under data.Plugins["repositories"].
 type Result struct {
 	Skipped       bool                 `json:"skipped,omitempty"`
@@ -89,6 +85,13 @@ type inputs struct {
 func (p *repositoriesPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any, error) {
 	if pc == nil || pc.Data == nil {
 		return nil, nil
+	}
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Featured:      []plugins.Repository{},
+		}, nil
 	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return &Result{

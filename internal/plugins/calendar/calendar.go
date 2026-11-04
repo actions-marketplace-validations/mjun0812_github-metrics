@@ -28,10 +28,6 @@ type calendarPlugin struct{}
 
 func (p *calendarPlugin) Name() string { return Name }
 
-func (p *calendarPlugin) Requires() []plugins.DataKey {
-	return []plugins.DataKey{plugins.KeyUser, plugins.KeyCommitCalendar}
-}
-
 // Result is the JSON payload published under data.Plugins["calendar"].
 type Result struct {
 	Skipped       bool           `json:"skipped,omitempty"`
@@ -77,6 +73,13 @@ type ContributionCell struct {
 func (p *calendarPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any, error) {
 	if pc == nil || pc.Data == nil {
 		return nil, nil
+	}
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Years:         []YearCalendar{},
+		}, nil
 	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return &Result{

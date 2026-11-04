@@ -41,10 +41,6 @@ type trafficPlugin struct{}
 
 func (p *trafficPlugin) Name() string { return Name }
 
-func (p *trafficPlugin) Requires() []plugins.DataKey {
-	return []plugins.DataKey{plugins.KeyRepositories}
-}
-
 // Result is the JSON payload published under data.Plugins["traffic"].
 type Result struct {
 	Skipped       bool                   `json:"skipped,omitempty"`
@@ -91,6 +87,14 @@ func (p *trafficPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any
 		return nil, nil
 	}
 	hideEmpty := pluginutil.ReadBoolDefault(pc.Inputs, "plugin_traffic_hide_empty", true)
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return &Result{
+			Skipped:       true,
+			SkippedReason: "plugin disabled",
+			Views:         map[string]TrafficView{},
+			HideEmpty:     hideEmpty,
+		}, nil
+	}
 	if pc.REST == nil {
 		return &Result{
 			Skipped:       true,

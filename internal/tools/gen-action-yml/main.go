@@ -5,8 +5,9 @@
 // stay in sync so callers (action.yml `with:`) and the runtime
 // (INPUT_<UPPER> env) see the same input shape.
 //
-// Run via `make gen-action-yml`. The lefthook pre-commit hook gates
-// drift (`git diff --quiet action.yml` after re-running the command).
+// Run via `make gen-action-yml`. The lefthook pre-commit hook
+// regenerates and re-stages action.yml, and
+// TestGenerate_MatchesCommittedActionYML fails on any drift.
 //
 // The generator walks `assets/plugins/<slug>/metadata.yml` for the
 // adopted plugin set (constitution 原則 III). `core` contributes the
@@ -175,7 +176,7 @@ outputs:
   metrics_url:
     description: 'URL of the generated metrics file inside the repository (when output_action committed).'
   metrics_sha:
-    description: 'Render-time SHA of the generated metrics file.'
+    description: 'Render-time SHA of the generated metrics file (svg output only).'
 
 runs:
   using: 'docker'

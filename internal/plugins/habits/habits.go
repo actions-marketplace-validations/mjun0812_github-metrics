@@ -36,12 +36,6 @@ type habitsPlugin struct{}
 
 func (p *habitsPlugin) Name() string { return Name }
 
-func (p *habitsPlugin) Requires() []plugins.DataKey {
-	// habits reads from pc.Data fields populated by base; it does not
-	// call Provider directly.
-	return []plugins.DataKey{}
-}
-
 // Result is the JSON payload published under data.Plugins["habits"].
 type Result struct {
 	Skipped       bool          `json:"skipped,omitempty"`
@@ -145,6 +139,9 @@ func (p *habitsPlugin) Run(ctx context.Context, pc *plugins.PluginContext) (any,
 			FactsEnabled:  factsEnabled,
 			ChartsEnabled: chartsEnabled,
 		}
+	}
+	if !pluginutil.TruthyInput(pc.Inputs, "plugin_"+Name) {
+		return skipped("plugin disabled"), nil
 	}
 	if reason, skip := plugins.RequireUserMode(pc, Name); skip {
 		return skipped(reason), nil

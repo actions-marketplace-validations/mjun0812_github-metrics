@@ -17,7 +17,7 @@ Before starting on any new feature, always check the following source of truth f
 
 `tests/compliance/compliance_test.go` gates the following. Fix immediately if any of them fail:
 
-- `TestCompliance_M4_AdoptedPlugins`: exact match of the 19 adopted plugin dirs
+- `TestCompliance_M4_AdoptedPlugins`: exact match of the adopted plugin dirs (the 19 user-visible plugins + `base`)
 - `TestNoUnadoptedPluginReference`: detects non-adopted plugin slugs leaking into production code
 - `TestNoRemovedSentinelComments`: forbids `// removed:`-style deletion-history comments — **code comments must describe only the current behavior, never "what was removed"**
 
@@ -42,7 +42,7 @@ See [docs/rendering.md](docs/rendering.md) for details.
 - **Input validation**: there is no layer that applies metadata.yml min/max at runtime. **Always clamp new integer inputs at the read site** (fall back to the default for non-positive values; cap GraphQL connection `first` at 100. `habits.go` / `reactions.go` #472 are precedents)
 - **Verifying visual changes**: rasterize golden SVGs to PNG with resvg and inspect them visually. resvg skips all `<text>` when it cannot resolve font-family, so pass a generic mapping such as `--sans-serif-family "Liberation Sans"`
 - **Doc samples**: `docs/examples/` is updated via draft PRs by the regen-doc-samples workflow (`gh workflow run regen-doc-samples.yml -f branch=main`). Do not edit locally
-- **Releases**: pushing a semver tag (`vX.Y.Z`) is all it takes — release.yml does everything (multi-arch images + binaries + cosign + vMAJOR floating tag)
+- **Releases**: pushing a semver tag (`vX.Y.Z`) is all it takes — release.yml does everything (multi-arch images + binaries + cosign + vMAJOR floating tag). After publishing, it commits an `action.yml` regenerated with `VERSION=vX.Y.Z` (`image: 'docker://ghcr.io/mjun0812/github-metrics:vX.Y.Z'`) on top of the tagged commit and force-moves `vX.Y.Z` and `vMAJOR` to it. That commit exists only under the tags; `action.yml` on main stays `image: 'Dockerfile'`. The GHCR package must be public, or the pin job fails before moving any tag
 
 ## Historical context
 

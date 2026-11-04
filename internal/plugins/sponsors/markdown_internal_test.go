@@ -1,29 +1,14 @@
 package sponsors
 
 import (
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mjun0812/github-metrics/internal/render/fontmetrics"
 )
-
-// TestRenderMarkdownSVG_Reference checks the native-SVG bio flow (#409
-// Phase B2): the paragraph text renders as escaped `<text>` and the
-// inline markdown link renders as an `<a href>` in link color.
-func TestRenderMarkdownSVG_Reference(t *testing.T) {
-	t.Parallel()
-	src := "Hi! I'm Junya Morioka.\nIf I have been of any help, I would be happy if you could sponsor me!\n\n" +
-		"[📝 About Me](https://mjunya.com/about/)"
-	got, _ := renderMarkdownSVG(src, 0, 0, 400)
-
-	for _, want := range []string{
-		`Hi! I&#39;m Junya Morioka.`,           // escaped bio text node
-		`<a href="https://mjunya.com/about/">`, // rendered markdown link
-		`fill="#58a6ff"`,                       // link color
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("renderMarkdownSVG missing %q\n got: %s", want, got)
-		}
-	}
-}
 
 // TestRenderMarkdownSVG_EscapesText ensures literal HTML/script in the
 // bio is escaped when flowed into `<text>` nodes.
@@ -38,17 +23,56 @@ func TestRenderMarkdownSVG_EscapesText(t *testing.T) {
 	}
 }
 
-// TestPopulateFromGraphQL_DiscardsPastWhenDisabled documents the #451
-// fix: when `past` is disabled the past connection (fetched only to
-// satisfy GitHub's `first >= 1` rule) is discarded.
-func TestPopulateFromGraphQL_DiscardsPastWhenDisabled(t *testing.T) {
+var mdTextRe = regexp.MustCompile(`<text x="([0-9.]+)"[^>]*>([^<]*)</text>`)
+
+// mdTexts returns the x and content of each emitted `<text>`.
+func mdTexts(t *testing.T, markup string) (xs []float64, texts []string) {
+	t.Helper()
+	for _, m := range mdTextRe.FindAllStringSubmatch(markup, -1) {
+		x, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		xs = append(xs, x)
+		texts = append(texts, m[2])
+	}
+	return xs, texts
+}
+
+// TestRenderMarkdownSVG_AdjacentLinksDoNotOverlap guards the emoji-link
+// row: a link whose label starts with a full-width emoji must advance
+// the next link past the whole emoji, not half of it.
+func TestRenderMarkdownSVG_AdjacentLinksDoNotOverlap(t *testing.T) {
 	t.Parallel()
-	out := &Result{}
-	// resp == nil exercises the nil-guard; past discard is covered by the
-	// `past` argument gating in populateFromGraphQL. With nil resp nothing
-	// is populated, so Past must remain empty regardless of the flag.
-	populateFromGraphQL(out, nil, false)
-	if len(out.Past) != 0 || out.Count.Past.Total != 0 {
-		t.Errorf("expected empty past with nil resp; got %+v", out)
+	got, _ := renderMarkdownSVG("[📝 About Me (JA)](https://a.example) [📝 About Me (EN)](https://b.example)", 0, 0, 400)
+	xs, texts := mdTexts(t, got)
+	if len(xs) != 2 {
+		t.Fatalf("want 2 <text>, got %d: %s", len(xs), got)
+	}
+	// The emoji is about 1em wide; everything else is measurable Latin.
+	minW := mdFont + fontmetrics.Width(" About Me (JA)", mdFont)
+	if xs[1]-xs[0] < minW {
+		t.Errorf("second link starts %.1f px after the first, want >= %.1f (%q)", xs[1]-xs[0], minW, texts[0])
+	}
+}
+
+// TestRenderMarkdownSVG_NoSpaceBeforeAdjacentPunctuation: whitespace is
+// inserted only where the source has it.
+func TestRenderMarkdownSVG_NoSpaceBeforeAdjacentPunctuation(t *testing.T) {
+	t.Parallel()
+	got, _ := renderMarkdownSVG("My project [wheels](https://a.example), which is [x](https://b.example) ok", 0, 0, 400)
+	xs, texts := mdTexts(t, got)
+	if len(xs) != 5 {
+		t.Fatalf("want 5 <text>, got %d: %s", len(xs), got)
+	}
+	// texts: "My project", "wheels", ", which is", "x", "ok"
+	if want := xs[1] + fontmetrics.Width(texts[1], mdFont); math.Abs(xs[2]-want) > 1 {
+		t.Errorf("text after link at x=%.2f, want %.2f (no gap before %q)", xs[2], want, texts[2])
+	}
+	if want := xs[0] + fontmetrics.Width(texts[0], mdFont) + fontmetrics.Width(" ", mdFont); math.Abs(xs[1]-want) > 1 {
+		t.Errorf("link at x=%.2f, want %.2f (one space after %q)", xs[1], want, texts[0])
+	}
+	if want := xs[3] + fontmetrics.Width(texts[3], mdFont) + fontmetrics.Width(" ", mdFont); math.Abs(xs[4]-want) > 1 {
+		t.Errorf("text after spaced link at x=%.2f, want %.2f", xs[4], want)
 	}
 }

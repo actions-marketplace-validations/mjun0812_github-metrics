@@ -30,7 +30,7 @@ func Compute(ctx context.Context, req Request, deps Deps) (*Result, error)
 ```
 
 - `Request{Login, Repo, Template, Format, Account, Inputs, Parallel, Die}`
-- `Deps{Settings, Metadata, Logger, HTTPClient, REST, GraphQL, Render}`
+- `Deps{Logger, HTTPClient, REST, GraphQL, Render}`
 - `Result{Data *plugins.Data, Errors []error, Output []byte, MIME string, Provider plugins.Provider}`
 
 `Compute` の流れ:
@@ -40,7 +40,7 @@ func Compute(ctx context.Context, req Request, deps Deps) (*Result, error)
 3. **レートゲート**: 起動時に GitHub API のレートリミット残量を確認する (#529)。
 4. **dataprovider の生成**: `dataprovider.New(...)` が、プロフィール / リポジトリ / カレンダーを **遅延 / メモ化**して取得する Provider を返す (#603)。共有データはここに集約され、各プラグインが重複取得を避けて読む。
 5. **core プラグイン (Stage 1)**: `core.Plugin.Run` が `config_*` を解釈して `data.Config` / `data.Computed` を埋める。
-6. **各プラグイン (Stage 2)**: `core.RunPlugins(ctx, pc, req.Parallel)` が登録済みの残りプラグインを `golang.org/x/sync/errgroup` で並列実行する。各結果は `data.Plugins[name]` に、エラーはプラグイン単位で同マップに格納される (`die=false` 時は footer に集約)。
+6. **各プラグイン (Stage 2)**: `core.RunPlugins(ctx, pc, req.Parallel)` が登録済みの残りプラグインを `golang.org/x/sync/errgroup` で並列実行する。各結果は `data.Plugins[name]` に、エラーはプラグイン単位で同マップに格納される (`die=false` 時は footer に集約)。`RunPlugins` は全プラグインを実行し、各プラグインが自身で `plugin_<name>` を判定して、無効なら API を呼ばず Skipped を返す (#823)。
 7. **出力ディスパッチ (Stage 3)**: `engine/dispatch.go` が `format` で分岐する。
 
 出力分岐 (`dispatchOutput`):
@@ -61,20 +61,19 @@ func Compute(ctx context.Context, req Request, deps Deps) (*Result, error)
 ```go
 type Plugin interface {
     Name() string
-    Requires() []DataKey
     Run(ctx context.Context, pc *PluginContext) (any, error)
 }
 ```
 
 - `Run` の戻り値 `any` がそのプラグインの結果で、`data.Plugins[name]` に格納される。他プラグインは `PluginContext.Imports.Get(name)` で参照できる。
-- `Requires()` は依存する共有データキーを申告する (dataprovider の取得計画に使われる)。
+- プラグインは共有データを `PluginContext.Provider` (遅延 / メモ化取得する dataprovider) から必要な時点で読む。依存データの事前申告や先読みは行わない。
 - `metadata.yml` は `assets/plugins/<name>/metadata.yml` として `//go:embed` でバンドルされ、入力定義 / `supports` (対応アカウント種別) / 必要スコープを持つ。
 
 ### 3.2 特殊プラグイン
 
 - **`core`**: データプラグインではなく、Stage 1 の設定注入と Stage 2 の並列ランナーを担うオーケストレーション用プラグイン (`internal/plugins/core`)。
 - **`base`**: activity+community / repositories のサマリーパネルを描く opt-in プラグイン。`dataprovider` からのみ読む。
-- `internal/plugins/pluginutil` と `internal/plugins/requirestesting` はプラグインではなく共有ヘルパ。
+- `internal/plugins/pluginutil` はプラグインではなく共有ヘルパ。
 
 採用プラグインの一覧と分類は [`scope.md`](scope_ja.md) を参照。
 
@@ -106,12 +105,12 @@ internal/
 ├── dataprovider/      … 共有データの遅延 / メモ化取得 (#603)
 ├── config/            … settings / metadata / 入力正規化
 ├── githubapi/         … REST (httpx) + GraphQL (genqlient) クライアント + scope 検出
-├── plugins/           … 各プラグイン (core / base / header / 19 データプラグイン)
+├── plugins/           … 各プラグイン (core / base / header を含む 19 ユーザー向けプラグイン)
 ├── templates/         … classic / repository + 共有 chrome パッケージ
 ├── render/            … SVG 装飾パイプライン + resvg ラスタライズ + fontmetrics
 ├── format/            … 数値 / 日付フォーマッタ
 └── ...                … logger / errors / httpx など
-assets/                … //go:embed するプラグイン / テンプレート metadata / CSS / フォント
+assets/                … //go:embed するプラグイン / テンプレート metadata / CSS / octicon データ
 tests/                 … golden / compliance / integration
 ```
 

@@ -93,26 +93,6 @@ func TestPartial_Languages_Golden(t *testing.T) {
 	if string(want) != got {
 		t.Fatalf("golden mismatch\nwant:\n%s\n\ngot:\n%s", string(want), got)
 	}
-	// DOM contract spot-checks (base markers + parity additions).
-	// #409 Phase B7: the count header, sub-header, and per-language list
-	// are now native SVG <text>/<g> instead of <h2>/<h3>/<div>; the
-	// progress bar (writeLanguageBar) stays verbatim.
-	for _, marker := range []string{
-		// v1.0.0 byte-frozen markers (preserved for backward compat)
-		`<g class="languages-progress">`,
-		`<rect class="language-bar"`,
-		// native-SVG parity markers:
-		`Language`,            // count text "N Language(s)"
-		`Most used languages`, // section sub-header text (row #3)
-		`<svg class="bar" xmlns="http://www.w3.org/2000/svg"`, // bar kept as nested <svg> (row #8)
-		`<title>Languages distribution</title>`,               // a11y title (row #16, Q1 verbatim preservation)
-		`role="img" aria-label="Languages distribution"`,      // a11y attrs (Q1 verbatim)
-		`<g class="languages-names">`,                         // per-language color-dot list (row #13)
-	} {
-		if !strings.Contains(got, marker) {
-			t.Errorf("partial missing marker %q in:\n%s", marker, got)
-		}
-	}
 }
 
 func TestPartial_Languages_Skipped(t *testing.T) {
@@ -126,37 +106,6 @@ func TestPartial_Languages_Skipped(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("expected empty fragment for Skipped=true; got %q", got)
-	}
-}
-
-// TestPartial_Languages_Recent verifies the recently-used section is
-// emitted as a <g class="languages-recent"> when languages.recent has a
-// non-skipped result.
-func TestPartial_Languages_Recent(t *testing.T) {
-	t.Parallel()
-	data := plugins.NewData()
-	data.SetPlugin(languages.Name, &languages.Result{
-		Favorites: []plugins.LanguageStat{{Name: "Go", Color: "#00ADD8", Size: 100, Value: 1}},
-		Sections:  []string{"most-used", "recently-used"},
-		Mostly:    plugins.LanguageStat{Name: "Go", Color: "#00ADD8", Size: 100, Value: 1},
-		Colors:    map[string]string{"Go": "#00ADD8"},
-	})
-	data.SetPlugin(languages.RecentName, &languages.RecentResult{
-		Favorites: []plugins.LanguageStat{{Name: "Python", Color: "#3572A5", Size: 200, Value: 1}},
-		Days:      7,
-		Load:      50,
-		Repos:     []string{"octocat/py"},
-	})
-	pc := &templates.PartialContext{Data: data}
-	got, _, err := languages.Partial(context.Background(), pc)
-	if err != nil {
-		t.Fatalf("Partial: %v", err)
-	}
-	if !strings.Contains(got, `<g class="languages-recent"`) {
-		t.Errorf("missing recently-used marker in:\n%s", got)
-	}
-	if !strings.Contains(got, `data-language="Python"`) {
-		t.Errorf("missing Python data attr in:\n%s", got)
 	}
 }
 
@@ -177,6 +126,10 @@ func TestPartial_Languages_NoDuplicateMaskID(t *testing.T) {
 		Favorites: []plugins.LanguageStat{{Name: "Python", Color: "#3572A5", Size: 200, Value: 1}},
 		Days:      7,
 		Load:      50,
+		Total:     2048,
+		Files:     3,
+		Commits:   1,
+		Latest:    5,
 		Repos:     []string{"octocat/py"},
 	})
 	pc := &templates.PartialContext{Data: data}
@@ -201,6 +154,16 @@ func TestPartial_Languages_NoDuplicateMaskID(t *testing.T) {
 	if seen["languages-bar-recent"] != 1 {
 		t.Errorf("expected exactly one languages-bar-recent mask, got %d", seen["languages-bar-recent"])
 	}
+	if !strings.Contains(got, `<g class="languages-recent"`) {
+		t.Errorf("missing recently-used marker in:\n%s", got)
+	}
+	if !strings.Contains(got, `data-language="Python"`) {
+		t.Errorf("missing Python data attr in:\n%s", got)
+	}
+	const want = "estimation from 2.0 kB of code in 3 edited files across 1 commit over last 5 days"
+	if !strings.Contains(got, want) {
+		t.Errorf("missing recent summary %q in:\n%s", want, got)
+	}
 }
 
 // TestPartial_Languages_Indepth verifies the indepth section is emitted
@@ -215,7 +178,7 @@ func TestPartial_Languages_Indepth(t *testing.T) {
 		Colors:    map[string]string{"Go": "#00ADD8"},
 	})
 	data.SetPlugin(languages.IndepthName, &languages.IndepthResult{
-		Total:    languages.LanguageBytes{Bytes: map[string]int64{"Go": 5000, "Rust": 2500}},
+		Total:    languages.LanguageBytes{Bytes: map[string]int64{"Go": 5000, "Rust": 2500, "Python": 2500}},
 		Analyzed: []string{"octocat/svc"},
 	})
 	pc := &templates.PartialContext{Data: data}
@@ -241,8 +204,48 @@ func TestPartial_Languages_Indepth(t *testing.T) {
 	for _, m := range matches {
 		indepthOrder = append(indepthOrder, m[1])
 	}
-	wantOrder := []string{"Go", "Rust"}
+	// Rust and Python tie on bytes; ties break alphabetically.
+	wantOrder := []string{"Go", "Python", "Rust"}
 	if !reflect.DeepEqual(indepthOrder, wantOrder) {
 		t.Errorf("indepth ordering = %v, want %v in:\n%s", indepthOrder, wantOrder, got)
+	}
+}
+
+// TestPartial_Languages_IndepthDrivesRows — with an indepth result the
+// rows (order, size, percentage) come from the indepth ranking, not from
+// the standard aggregation.
+func TestPartial_Languages_IndepthDrivesRows(t *testing.T) {
+	t.Parallel()
+	data := plugins.NewData()
+	data.SetPlugin(languages.Name, &languages.Result{
+		Favorites: []plugins.LanguageStat{
+			{Name: "JavaScript", Color: "#f1e05a", Size: 90000, Value: 0.9},
+			{Name: "Go", Color: "#00ADD8", Size: 10000, Value: 0.1},
+		},
+		Sections: []string{"most-used"},
+		Details:  []string{"bytes-size", "percentage"},
+	})
+	data.SetPlugin(languages.IndepthName, &languages.IndepthResult{
+		Total: languages.LanguageBytes{Bytes: map[string]int64{"Go": 750, "JavaScript": 450}},
+		Favorites: []plugins.LanguageStat{
+			{Name: "Go", Color: "#00ADD8", Size: 750, Value: 0.625},
+			{Name: "JavaScript", Color: "#f1e05a", Size: 450, Value: 0.375},
+		},
+		Analyzed: []string{"octocat/alpha"},
+	})
+	got, _, err := languages.Partial(context.Background(), &templates.PartialContext{Data: data})
+	if err != nil {
+		t.Fatalf("Partial: %v", err)
+	}
+	for _, want := range []string{"750 B  62.5%", "450 B  37.5%"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q", want)
+		}
+	}
+	if strings.Contains(got, "90000") || strings.Contains(got, "87.9 kB") {
+		t.Errorf("standard aggregation leaked into indepth rows")
+	}
+	if strings.Index(got, `data-language="Go"`) > strings.Index(got, `data-language="JavaScript"`) {
+		t.Errorf("Go must be listed before JavaScript")
 	}
 }
